@@ -22,8 +22,16 @@ const messageBuffers = new Map<string, MessageBuffer>();
 
 const UPDATE_INTERVAL = 800;
 
+let isListenerStarted = false;
+let shouldStopListener = false;
+
 export async function startGlobalEventListener(api: OpenCodeApi, feishu: FeishuClient) {
-  console.log('[Listener] 🎧 Starting Global Event Subscription...');
+  if (isListenerStarted) {
+    console.log('[Listener] ⚠️ Global Listener already running. Skipping.');
+    return;
+  }
+
+  isListenerStarted = true;
 
   let retryCount = 0;
 
@@ -35,6 +43,11 @@ export async function startGlobalEventListener(api: OpenCodeApi, feishu: FeishuC
       retryCount = 0;
 
       for await (const event of events.stream) {
+        if (shouldStopListener) {
+          console.log('[Listener] 🛑 Loop terminated by dispose signal.');
+          break;
+        }
+
         if (event.type === 'message.part.updated') {
           const sessionId = event.properties.part.sessionID;
           const part = event.properties.part;
@@ -63,6 +76,8 @@ export async function startGlobalEventListener(api: OpenCodeApi, feishu: FeishuC
       }
     } catch (error) {
       console.error('[Listener] ❌ Stream Disconnected:', error);
+
+      if (shouldStopListener) return;
 
       const delay = Math.min(5000 * (retryCount + 1), 60000);
       retryCount++;
@@ -177,3 +192,11 @@ export const createMessageHandler = (api: OpenCodeApi, feishu: FeishuClient) => 
     }
   };
 };
+
+export function stopGlobalEventListener() {
+  shouldStopListener = true;
+  isListenerStarted = false;
+  sessionToFeishuMap.clear();
+  messageBuffers.clear();
+  console.log('[Listener] 🛑 Stop signal received.');
+}

@@ -252,4 +252,22 @@ export class FeishuClient {
       console.log(`✅ Feishu Webhook Server listening on port ${port}`);
     });
   }
+
+  public async stop() {
+    if (this.wsClient) {
+      try {
+        console.log('[Feishu] Stopping WebSocket client...');
+        this.wsClient = null;
+        globalState.__feishu_ws_client_instance = null;
+      } catch (e) {
+        console.warn('[Feishu] Error stopping WS:', e);
+      }
+    }
+
+    if (this.httpServer) {
+      console.log('[Feishu] Stopping Webhook server...');
+      this.httpServer.close();
+      this.httpServer = null;
+    }
+  }
 }

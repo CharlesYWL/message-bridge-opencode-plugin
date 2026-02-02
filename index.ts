@@ -2,19 +2,23 @@ import type { Plugin } from '@opencode-ai/plugin';
 import type { Config } from '@opencode-ai/sdk';
 import { FeishuClient } from './src/feishu';
 import { buildOpenCodeApi } from './src/opencode';
-// 1. 引入 startGlobalEventListener
 import { createMessageHandler, startGlobalEventListener } from './src/handler';
 import type { FeishuConfig } from './src/types';
 import { PLUGIN_CONFIG_NAME } from './src/constants';
+import { globalState } from './src/utils';
+
+if (!globalState.__feishu_plugin_listener_started) {
+  globalState.__feishu_plugin_listener_started = false;
+}
+
+let feishuInstance: FeishuClient | null = globalState.__feishu_client_instance || null;
 
 export const FeishuBridgePlugin: Plugin = async ctx => {
   const { client } = ctx;
-
-  console.log('[Plugin] Plugin Loaded.');
+  console.log('[Plugin] Plugin Initializing...');
 
   const bootstrap = async () => {
     try {
-      // 1. 获取配置
       const configPromise = client.config.get();
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Config Timeout')), 1000)
@@ -25,6 +29,7 @@ export const FeishuBridgePlugin: Plugin = async ctx => {
         rawResponse = await Promise.race([configPromise, timeoutPromise]);
       } catch (e) {
         console.error('[Plugin] Config API Failed', e);
+        return;
       }
 
       const agentConfig = (rawResponse?.data || rawResponse || {}) as Config;
@@ -42,7 +47,6 @@ export const FeishuBridgePlugin: Plugin = async ctx => {
         return;
       }
 
-      // 2. 初始化组件
       const config: FeishuConfig = {
         appId,
         appSecret,
@@ -53,30 +57,39 @@ export const FeishuBridgePlugin: Plugin = async ctx => {
       };
 
       const api = buildOpenCodeApi(client);
-      const feishuClient = new FeishuClient(config);
 
-      // --- 🔥 关键修改开始 🔥 ---
+      if (!feishuInstance) {
+        console.log('[Plugin] Creating new FeishuClient...');
+        feishuInstance = new FeishuClient(config);
+        globalState.__feishu_client_instance = feishuInstance;
+      } else {
+        console.log('[Plugin] Reusing existing FeishuClient instance.');
+      }
 
-      // 3. 启动全局事件监听 (独立于用户消息循环)
-      // 这是“接收端”：负责监听 OpenCode 的流式回复并推送到飞书
-      // 使用 .catch 防止监听器启动失败阻塞后续的 Webhook 启动
-      startGlobalEventListener(api, feishuClient).catch(err => {
-        console.error('[Plugin] ❌ Failed to start Global Event Listener:', err);
-      });
+      const feishuClient = feishuInstance!;
 
-      // --- 🔥 关键修改结束 🔥 ---
+      if (!globalState.__feishu_plugin_listener_started) {
+        console.log('[Plugin] Starting Global Event Listener...');
 
-      // 4. 创建消息处理器 (这是“发送端”：只负责将用户消息转给 OpenCode)
+        startGlobalEventListener(api, feishuClient).catch(err => {
+          console.error('[Plugin] ❌ Failed to start Global Event Listener:', err);
+          globalState.__feishu_plugin_listener_started = false;
+        });
+
+        globalState.__feishu_plugin_listener_started = true;
+      } else {
+        console.log('[Plugin] Global Event Listener already running. Skipping.');
+      }
+
       const messageHandler = createMessageHandler(api, feishuClient);
 
-      // 5. 启动飞书服务
       if (config.mode === 'webhook') {
         await feishuClient.startWebhook(messageHandler);
       } else {
         await feishuClient.startWebSocket(messageHandler);
       }
 
-      console.log(`[Plugin] 🚀 Service started in [${mode}] mode.`);
+      console.log(`[Plugin] 🚀 Service Ready in [${mode}] mode.`);
     } catch (error) {
       console.error('[Plugin] Bootstrap Error:', error);
     }
