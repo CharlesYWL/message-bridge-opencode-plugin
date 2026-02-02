@@ -1,56 +1,64 @@
 import type { OpenCodeApi } from './opencode';
 import type { FeishuClient } from './feishu';
 import { LOADING_EMOJI } from './constants';
-import { Part, Event } from '@opencode-ai/sdk';
+import type { Part } from '@opencode-ai/sdk';
 
+// --- 类型定义 ---
 interface SessionContext {
   chatId: string;
   senderId: string;
 }
 
 interface MessageBuffer {
-  feishuMsgId: string | null;
-  fullContent: string;
-  type: Part['type'];
-  lastUpdateTime: number;
+  feishuMsgId: string | null; // 飞书侧的消息 ID
+  fullContent: string; // 本地累积的完整内容
+  type: 'text' | 'reasoning';
+  lastUpdateTime: number; // 上次调用飞书 API 的时间
   isFinished: boolean;
 }
 
+// --- 全局状态 ---
+// 1. 路由表
 const sessionToFeishuMap = new Map<string, SessionContext>();
-
+// 2. 消息缓冲区
 const messageBuffers = new Map<string, MessageBuffer>();
 
+// 3. 节流间隔 (毫秒)
 const UPDATE_INTERVAL = 800;
-
+// 4. 监听器锁
 let isListenerStarted = false;
 let shouldStopListener = false;
 
+// --- 核心功能 1: 全局事件监听器 ---
 export async function startGlobalEventListener(api: OpenCodeApi, feishu: FeishuClient) {
-  if (isListenerStarted) {
-    console.log('[Listener] ⚠️ Global Listener already running. Skipping.');
-    return;
-  }
-
+  if (isListenerStarted) return;
   isListenerStarted = true;
+  shouldStopListener = false;
+
+  console.log('[Listener] 🎧 Starting Global Event Subscription...');
 
   let retryCount = 0;
 
   const connect = async () => {
     try {
-      // 建立 WebSocket 长连接
       const events = await api.event.subscribe();
       console.log('[Listener] ✅ Connected to OpenCode Event Stream');
       retryCount = 0;
 
       for await (const event of events.stream) {
         if (shouldStopListener) {
-          console.log('[Listener] 🛑 Loop terminated by dispose signal.');
+          console.log('[Listener] 🛑 Loop terminated.');
           break;
         }
 
         if (event.type === 'message.part.updated') {
+          // 获取核心数据
           const sessionId = event.properties.part.sessionID;
           const part = event.properties.part;
+
+          // 🔥 关键修复 1: 获取增量数据 delta 🔥
+          // SDK 的 event.properties 里通常包含 delta 字段
+          const delta = (event.properties as any).delta;
 
           if (!sessionId || !part) continue;
 
@@ -60,28 +68,24 @@ export async function startGlobalEventListener(api: OpenCodeApi, feishu: FeishuC
           const msgId = part.messageID;
 
           if (part.type === 'text' || part.type === 'reasoning') {
-            await handleStreamUpdate(feishu, context.chatId, msgId, part);
+            // 将 delta 传给处理函数
+            await handleStreamUpdate(feishu, context.chatId, msgId, part, delta);
           } else if (part.type === 'tool') {
             if (part.state?.status === 'running') {
+              // 可选：打印日志或通知
               console.log(`[Listener] 🔧 Tool Running: ${part.tool}`);
             }
           }
-        } else if (event.type === 'session.deleted') {
-          const sid = event.properties.info.id;
-          if (sid) sessionToFeishuMap.delete(sid);
-        } else if (event.type === 'session.error') {
-          const sid = event.properties.sessionID;
+        } else if (event.type === 'session.deleted' || event.type === 'session.error') {
+          const sid = (event.properties as any).sessionID;
           if (sid) sessionToFeishuMap.delete(sid);
         }
       }
     } catch (error) {
-      console.error('[Listener] ❌ Stream Disconnected:', error);
-
       if (shouldStopListener) return;
-
+      console.error('[Listener] ❌ Stream Disconnected:', error);
       const delay = Math.min(5000 * (retryCount + 1), 60000);
       retryCount++;
-      console.log(`[Listener] 🔄 Reconnecting in ${delay / 1000}s...`);
       setTimeout(connect, delay);
     }
   };
@@ -89,13 +93,25 @@ export async function startGlobalEventListener(api: OpenCodeApi, feishu: FeishuC
   connect();
 }
 
-async function handleStreamUpdate(feishu: FeishuClient, chatId: string, msgId: string, part: Part) {
+export function stopGlobalEventListener() {
+  shouldStopListener = true;
+  isListenerStarted = false;
+  sessionToFeishuMap.clear();
+  messageBuffers.clear();
+}
+
+// 辅助函数：处理流式更新
+async function handleStreamUpdate(
+  feishu: FeishuClient,
+  chatId: string,
+  msgId: string,
+  part: Part,
+  delta?: string // 🔥 新增参数
+) {
   if (!msgId) return;
+  if (part.type !== 'text' && part.type !== 'reasoning') return;
 
-  if (part.type !== 'text' && part.type !== 'reasoning') {
-    return;
-  }
-
+  // 获取或初始化 Buffer
   let buffer = messageBuffers.get(msgId);
   if (!buffer) {
     buffer = {
@@ -108,10 +124,19 @@ async function handleStreamUpdate(feishu: FeishuClient, chatId: string, msgId: s
     messageBuffers.set(msgId, buffer);
   }
 
-  if (part.text) {
-    buffer.fullContent = part.text;
+  // 🔥 关键修复 2: 优先使用 Delta 追加，否则使用全量覆盖 🔥
+  if (typeof delta === 'string' && delta.length > 0) {
+    // 情况 A: 有增量，追加
+    buffer.fullContent += delta;
+  } else if (typeof part.text === 'string') {
+    // 情况 B: 无增量，可能是第一帧或者全量包
+    // 只有当 part.text 比当前 buffer 长的时候才覆盖，防止旧数据覆盖新数据
+    if (part.text.length >= buffer.fullContent.length) {
+      buffer.fullContent = part.text;
+    }
   }
 
+  // 节流与更新逻辑
   const now = Date.now();
   const shouldUpdate = !buffer.feishuMsgId || now - buffer.lastUpdateTime > UPDATE_INTERVAL;
 
@@ -119,7 +144,6 @@ async function handleStreamUpdate(feishu: FeishuClient, chatId: string, msgId: s
     buffer.lastUpdateTime = now;
 
     let displayContent = buffer.fullContent;
-
     if (buffer.type === 'reasoning') {
       displayContent = `🤔 思考中...\n\n${displayContent}`;
     }
@@ -137,6 +161,7 @@ async function handleStreamUpdate(feishu: FeishuClient, chatId: string, msgId: s
   }
 }
 
+// --- 核心功能 2: 极简消息处理器 ---
 const sessionCache = new Map<string, string>();
 
 export const createMessageHandler = (api: OpenCodeApi, feishu: FeishuClient) => {
@@ -163,28 +188,25 @@ export const createMessageHandler = (api: OpenCodeApi, feishu: FeishuClient) => 
 
         if (sessionId) {
           sessionCache.set(chatId, sessionId);
-          console.log(`[Bridge] ✨ Created Session: ${sessionId}`);
         }
       }
 
       if (!sessionId) throw new Error('Failed to init Session');
 
+      // 注册路由
       sessionToFeishuMap.set(sessionId, { chatId, senderId });
 
+      // 发送请求
       await api.promptSession({
         path: { id: sessionId },
         body: { parts: [{ type: 'text', text: text }] },
       });
 
-      console.log(`[Bridge] 🚀 Prompt Sent to ${sessionId}. Listener will handle the rest.`);
+      console.log(`[Bridge] 🚀 Prompt Sent.`);
     } catch (error: any) {
       console.error('[Bridge] ❌ Error:', error);
-
-      if (error.status === 404) {
-        sessionCache.delete(chatId);
-      }
-
-      await feishu.sendMessage(chatId, `❌ Error: ${error.message || 'Request failed'}`);
+      if (error.status === 404) sessionCache.delete(chatId);
+      await feishu.sendMessage(chatId, `❌ Error: ${error.message}`);
     } finally {
       if (messageId && reactionId) {
         await feishu.removeReaction(messageId, reactionId).catch(() => {});
@@ -192,11 +214,3 @@ export const createMessageHandler = (api: OpenCodeApi, feishu: FeishuClient) => 
     }
   };
 };
-
-export function stopGlobalEventListener() {
-  shouldStopListener = true;
-  isListenerStarted = false;
-  sessionToFeishuMap.clear();
-  messageBuffers.clear();
-  console.log('[Listener] 🛑 Stop signal received.');
-}
