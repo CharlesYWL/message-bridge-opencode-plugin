@@ -4,13 +4,22 @@ import type {
   SessionPromptData,
   SessionMessagesData,
   SessionListData,
+  OpencodeClient,
 } from '@opencode-ai/sdk';
 
 export interface OpenCodeApi {
-  createSession: (data: Omit<SessionCreateData, 'url'>) => Promise<any>;
-  promptSession: (data: Omit<SessionPromptData, 'url'>) => Promise<any>;
-  getMessages: (data: Omit<SessionMessagesData, 'url'>) => Promise<any>;
-  getSessionList: (data: Omit<SessionListData, 'url'>) => Promise<any>;
+  createSession: (
+    data: Omit<SessionCreateData, 'url'>
+  ) => Promise<ReturnType<OpencodeClient['session']['create']>>;
+  promptSession: (
+    data: Omit<SessionPromptData, 'url'>
+  ) => Promise<ReturnType<OpencodeClient['session']['prompt']>>;
+  getMessages: (
+    data: Omit<SessionMessagesData, 'url'>
+  ) => Promise<ReturnType<OpencodeClient['session']['messages']>>;
+  getSessionList: (
+    data: Omit<SessionListData, 'url'>
+  ) => Promise<ReturnType<OpencodeClient['session']['list']>>;
 }
 
 const findMethod = (client: any, name: string, namespace?: string) => {

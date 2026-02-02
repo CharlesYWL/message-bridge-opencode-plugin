@@ -2,22 +2,17 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import * as http from 'http';
 import * as crypto from 'crypto';
 import type { FeishuConfig } from './types';
-
-const globalState = globalThis as any;
-
-// Deduplication cache
-const processedMessageIds = globalState.__feishu_processed_ids || new Set<string>();
-globalState.__feishu_processed_ids = processedMessageIds;
+import { globalState, processedMessageIds } from './utils';
 
 type MessageHandler = (
   chatId: string,
   text: string,
   messageId: string,
-  senderId: string,
+  senderId: string
 ) => Promise<void>;
 
 /**
- * 🔐 Decrypt Feishu Event (AES-256-CBC)
+ * 🔐 解密飞书事件 (AES-256-CBC)
  */
 function decryptEvent(encrypted: string, encryptKey: string): string {
   const key = crypto.createHash('sha256').update(encryptKey).digest();
@@ -52,23 +47,40 @@ export class FeishuClient {
       return true;
     }
     processedMessageIds.add(messageId);
-    if (processedMessageIds.size > 1000) {
+    // 限制缓存大小，防止内存泄漏
+    if (processedMessageIds.size > 2000) {
       const first = processedMessageIds.values().next().value;
       processedMessageIds.delete(first);
     }
     return false;
   }
 
+  /**
+   * 精确解析消息内容，剔除 @ 机器人占位符，增强错误上报
+   */
   private parseAndCleanContent(contentJson: string, mentions?: any[]): string {
     try {
       const content = JSON.parse(contentJson);
-      let text = content.text || '';
+      let text: string = content.text || '';
+
+      // 1. 根据 mentions 数组精确剔除占位符 (如 at_1)，避免正则误伤邮箱
       if (mentions && mentions.length > 0) {
-        text = text.replace(/@\S+\s*/g, '').trim();
+        mentions.forEach((m: any) => {
+          if (m.key) {
+            const regex = new RegExp(m.key, 'g');
+            text = text.replace(regex, '');
+          }
+        });
       }
+
+      // 2. 清理多余空格
       return text.trim();
-    } catch (e) {
-      console.error('[Feishu] ⚠️ Failed to parse message content JSON:', e);
+    } catch (e: any) {
+      // 捕获并报告详细错误
+      console.error(`[Feishu] ❌ Content Parse Error!`, {
+        error: e.message,
+        rawContent: contentJson,
+      });
       return '';
     }
   }
@@ -111,19 +123,18 @@ export class FeishuClient {
         path: { message_id: messageId, reaction_id: reactionId },
       });
     } catch (error) {
-      // ignore
+      // 忽略移除失败（可能由于表情已被手动移除）
     }
   }
 
   /**
-   * Start WebSocket Listener (Long Connection)
+   * 启动 WebSocket 监听 (长连接模式)
    */
   public async startWebSocket(onMessage: MessageHandler) {
     if (globalState.__feishu_ws_client_instance) {
-      console.log('[Feishu WS] ⚠️ Active WebSocket connection detected. Skipping initialization.');
+      console.log('[Feishu WS] ⚠️ Active connection detected. Skipping.');
       return;
     }
-    console.log('[Feishu WS] Initializing WebSocket Client...');
 
     this.wsClient = new lark.WSClient({
       appId: this.config.appId,
@@ -133,146 +144,102 @@ export class FeishuClient {
 
     const dispatcher = new lark.EventDispatcher({}).register({
       'im.message.receive_v1': async data => {
-        const chatId = data.message.chat_id;
-        const messageId = data.message.message_id;
-        const senderId = (data.message as any).sender?.sender_id?.open_id || '';
+        const { message } = data;
+        const messageId = message.message_id;
+        const chatId = message.chat_id;
+        const senderId = (message as any).sender?.sender_id?.open_id || '';
 
         if (this.isMessageProcessed(messageId)) return;
 
-        const text = this.parseAndCleanContent(data.message.content, data.message.mentions);
+        const text = this.parseAndCleanContent(message.content, message.mentions);
         if (!text) return;
 
-        console.log(`[Feishu WS] 📩 Received message: "${text}" from ${senderId}`);
+        console.log(`[Feishu WS] 📩 Message from ${senderId}: "${text}"`);
         await onMessage(chatId, text, messageId, senderId);
       },
     });
 
     await this.wsClient.start({ eventDispatcher: dispatcher });
     globalState.__feishu_ws_client_instance = this.wsClient;
-    console.log('✅ Feishu WebSocket Connected successfully!');
+    console.log('✅ Feishu WebSocket Connected!');
   }
 
   /**
-   * ✅ 
-   * Start Webhook Server (HTTP Mode)
-   * Manual implementation to handle Encryption and URL Verification transparently.
+   * 启动 Webhook 服务 (HTTP 模式)
    */
   public async startWebhook(onMessage: MessageHandler) {
-    if (this.httpServer) {
-      console.log('[Feishu Webhook] ⚠️ Server is already running.');
-      return;
-    }
+    if (this.httpServer) return;
 
     const port = this.config.port || 8080;
-
-    console.log(`[Feishu Webhook] Starting HTTP Server on port: ${port} (Accepting all paths)...`);
-
     this.httpServer = http.createServer((req, res) => {
-      // 1. Only accept POST
       if (req.method !== 'POST') {
-        console.log(`[Feishu Webhook] 🚫 Blocked ${req.method} request`);
         res.writeHead(405);
-        res.end('Method Not Allowed');
+        res.end();
         return;
       }
 
-      // 2. Read Body
       const chunks: Buffer[] = [];
       req.on('data', chunk => chunks.push(chunk));
-
       req.on('end', async () => {
         try {
           const rawBody = Buffer.concat(chunks).toString('utf8');
-          if (!rawBody) {
-            console.log('[Feishu Webhook] Received empty body.');
-            res.end('ok');
-            return;
-          }
+          if (!rawBody) return res.end();
 
           let body: any = JSON.parse(rawBody);
 
-          // 3. Handle Encryption
-          if (body.encrypt) {
-            console.log('[Feishu Webhook] 🔐 Encrypted payload detected.');
-            if (this.config.encryptKey) {
-              try {
-                const decrypted = decryptEvent(body.encrypt, this.config.encryptKey);
-                body = JSON.parse(decrypted);
-                console.log('[Feishu Webhook] 🔓 Decryption successful.');
-              } catch (e) {
-                console.error(
-                  '[Feishu Webhook] ❌ Decryption failed. Please check FEISHU_ENCRYPT_KEY.',
-                  e,
-                );
-                res.writeHead(500);
-                res.end('Decryption Failed');
-                return;
-              }
-            } else {
-              console.warn(
-                '[Feishu Webhook] ⚠️ Received encrypted data but no FEISHU_ENCRYPT_KEY configured!',
-              );
+          // 解密逻辑
+          if (body.encrypt && this.config.encryptKey) {
+            try {
+              const decrypted = decryptEvent(body.encrypt, this.config.encryptKey);
+              body = JSON.parse(decrypted);
+            } catch (e) {
+              console.error('[Feishu Webhook] ❌ Decryption Failed');
+              res.writeHead(500);
+              return res.end();
             }
           }
 
-          // 4. 🔥 URL Verification (Challenge)
+          // URL 验证
           if (body.type === 'url_verification') {
-            console.log(
-              `[Feishu Webhook] 🟢 Received URL Verification Challenge: ${body.challenge}`,
-            );
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ challenge: body.challenge }));
-            return;
+            return res.end(JSON.stringify({ challenge: body.challenge }));
           }
 
-          // 5. Handle Message Event
-          const eventType = body.header?.event_type;
-
-          if (eventType === 'im.message.receive_v1') {
-            // Acknowledge immediately
+          if (body.header?.event_type === 'im.message.receive_v1') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ code: 0 }));
 
-            // Async processing
             const event = body.event;
             const messageId = event.message?.message_id;
             const chatId = event.message?.chat_id;
-            const senderId = event.sender?.sender_id?.open_id;
+            const senderId = event.sender?.sender_id?.open_id || '';
 
-            if (messageId && chatId) {
-              if (this.isMessageProcessed(messageId)) return;
-
+            if (messageId && chatId && !this.isMessageProcessed(messageId)) {
               const text = this.parseAndCleanContent(event.message.content, event.message.mentions);
               if (text) {
-                console.log(`[Feishu Webhook] 📩 Message: "${text}" (User: ${senderId})`);
-
-                onMessage(chatId, text, messageId, senderId || '').catch(err => {
-                  console.error('[Feishu Webhook] ❌ Logic Error inside handler:', err);
+                console.log(`[Feishu Webhook] 📩 Message from ${senderId}: "${text}"`);
+                onMessage(chatId, text, messageId, senderId).catch(err => {
+                  console.error('[Feishu Webhook] ❌ Handler Error:', err);
                 });
-              } else {
-                console.log('[Feishu Webhook] Received message but extracted text was empty.');
               }
             }
             return;
           }
-
-          // Log other events
-          console.log(`[Feishu Webhook] ℹ️ Ignored event type: ${eventType}`);
 
           res.writeHead(200);
           res.end('OK');
         } catch (error) {
-          console.error('[Feishu Webhook] ❌ Internal Request Error:', error);
+          console.error('[Feishu Webhook] ❌ Server Error:', error);
           if (!res.headersSent) {
             res.writeHead(500);
-            res.end('Internal Server Error');
+            res.end();
           }
         }
       });
     });
 
     this.httpServer.listen(port, () => {
-      console.log(`✅ Feishu Webhook Server listening: http://localhost:${port}`);
+      console.log(`✅ Feishu Webhook Server listening on port ${port}`);
     });
   }
 }
