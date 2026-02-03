@@ -79,6 +79,7 @@ UI 相关命令（主题/编辑器/退出等）**不适合聊天场景**，因�
 * `/thinking`
 * `/undo`
 * `/unshare`
+* `/maxFileSize`
 
 ### 已适配的命令
 
@@ -88,6 +89,7 @@ UI 相关命令（主题/编辑器/退出等）**不适合聊天场景**，因�
 * `/models` → 列出 provider 与模型
 * `/new` → 创建并绑定新会话
 * `/sessions` → 列出会话（回复 `/sessions <id>` 切换）
+* `/maxFileSize <xmb>` → 设置上传文件大小限制（默认 10MB）
 * `/share` / `/unshare`
 * `/compact`（别名 `/summarize`）
 * `/init`
@@ -113,6 +115,7 @@ UI 相关命令（主题/编辑器/退出等）**不适合聊天场景**，因�
 ### 会话 / Agent 切换
 
 `/sessions` 会返回会话列表与可选项，结果会直接回到聊天窗口，你只需回复 `/sessions <id>` **或** `/sessions <序号>` 即可切换并绑定到目标会话。
+文件上传大小限制可通过 `/maxFileSize <xmb>` 调整（默认 10MB）。
 
 如果你的 OpenCode 环境提供了其它 slash 命令，且未在上面专门适配，则仍会走 `session.command` 透传。
 

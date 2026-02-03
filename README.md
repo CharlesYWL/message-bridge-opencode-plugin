@@ -88,6 +88,7 @@ From the official TUI docs, the built-in commands include:
 * `/thinking`
 * `/undo`
 * `/unshare`
+* `/maxFileSize`
 
 ### Bridge-Handled Commands
 
@@ -97,6 +98,7 @@ These are implemented directly against OpenCode APIs:
 * `/models` → list providers and models
 * `/new` → create and bind to a new session
 * `/sessions` → list sessions (reply with `/sessions <id>` to bind)
+* `/maxFileSize <xmb>` → set upload file size limit (default 10MB)
 * `/share` / `/unshare`
 * `/compact` (alias `/summarize`)
 * `/init`
@@ -122,6 +124,7 @@ Custom commands are supported via:
 ### Session / Agent Switching
 
 Session switching via `/sessions` is fully supported. The list is returned to the chat, and you can reply with `/sessions <id>` **or** `/sessions <index>` to bind this chat to the chosen session.
+File upload size limit can be adjusted per chat with `/maxFileSize <xmb>` (default 10MB).
 
 If your OpenCode setup provides additional slash commands, they will still be forwarded via `session.command` unless explicitly handled above.
 
