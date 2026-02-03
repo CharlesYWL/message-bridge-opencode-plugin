@@ -141,7 +141,11 @@ function renderHelpCommand(command: string): any[] | null {
   elements.push(larkMd('**Help**'));
   elements.push(
     larkMd(
-      ['```', ...commandLines.map(l => l.replace(/^-\s*/, '')), '```'].join('\n')
+      [
+        '```text',
+        ...commandLines.map(l => l.replace(/^-\\s*/, '')),
+        '```',
+      ].join('\n')
     )
   );
   return elements;

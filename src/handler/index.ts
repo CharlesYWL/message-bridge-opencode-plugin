@@ -380,8 +380,12 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
         return sessionId;
       };
 
+      const sendCommandMessage = async (content: string) => {
+        await adapter.sendMessage(chatId, `## Command\n${content}`);
+      };
+
       const sendUnsupported = async () => {
-        await adapter.sendMessage(chatId, `❌ 命令 /${slash?.command} 暂不支持在聊天中使用。`);
+        await sendCommandMessage(`❌ 命令 /${slash?.command} 暂不支持在聊天中使用。`);
       };
 
       const isKnownCustomCommand = async (name: string): Promise<boolean | null> => {
@@ -421,7 +425,7 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
               lines.push(`/${cmd?.name} ${desc}`);
             });
           }
-          await adapter.sendMessage(chatId, lines.join('\n'));
+          await sendCommandMessage(lines.join('\n'));
           return;
         }
 
@@ -432,7 +436,7 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
           const defaults = data?.default ?? {};
 
           if (!Array.isArray(providers) || providers.length === 0) {
-            await adapter.sendMessage(chatId, '暂无可用模型信息。');
+            await sendCommandMessage('暂无可用模型信息。');
             return;
           }
 
@@ -456,13 +460,13 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
             lines.push(`Models: ${models.join(', ') || '-'}`);
           });
 
-          await adapter.sendMessage(chatId, lines.join('\n'));
+          await sendCommandMessage(lines.join('\n'));
           return;
         }
 
         if (normalizedCommand === 'agent' && targetAgent) {
           chatAgent.set(cacheKey, targetAgent);
-          await adapter.sendMessage(chatId, `✅ 已切换 Agent: ${targetAgent}`);
+          await sendCommandMessage(`✅ 已切换 Agent: ${targetAgent}`);
           return;
         }
 
@@ -471,7 +475,7 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
           const data = (res as any)?.data ?? res;
           const sessions = Array.isArray(data) ? data : [];
           if (sessions.length === 0) {
-            await adapter.sendMessage(chatId, '暂无会话，请使用 /new 创建。');
+            await sendCommandMessage('暂无会话，请使用 /new 创建。');
             return;
           }
           const list = sessions.slice(0, 20).map((s: any) => ({
@@ -483,7 +487,7 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
           list.forEach((s, idx) => {
             lines.push(`${idx + 1}. ${s.title}`);
           });
-          await adapter.sendMessage(chatId, lines.join('\n'));
+          await sendCommandMessage(lines.join('\n'));
           return;
         }
 
@@ -496,9 +500,9 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
           const sessionId = await createNewSession();
           console.log(`[Bridge] [${adapterKey}] [Session: ${sessionId}] 🆕 New Session Bound.`);
           if (sessionId) {
-            await adapter.sendMessage(chatId, `✅ 已切换到新会话: ${sessionId}`);
+            await sendCommandMessage(`✅ 已切换到新会话: ${sessionId}`);
           } else {
-            await adapter.sendMessage(chatId, '❌ 新会话创建失败，请稍后重试。');
+            await sendCommandMessage('❌ 新会话创建失败，请稍后重试。');
           }
           return;
         }
@@ -517,7 +521,7 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
             if (idx >= 0 && idx < list.length) {
               targetId = list[idx].id;
             } else {
-              await adapter.sendMessage(chatId, `❌ 无效序号: ${targetSessionId}`);
+              await sendCommandMessage(`❌ 无效序号: ${targetSessionId}`);
               return;
             }
           }
@@ -525,7 +529,7 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
           sessionToAdapterKey.set(targetId, adapterKey);
           sessionToCtx.set(targetId, { chatId, senderId });
           chatAgent.delete(cacheKey);
-          await adapter.sendMessage(chatId, `✅ 已切换到会话: ${targetId}`);
+          await sendCommandMessage(`✅ 已切换到会话: ${targetId}`);
           return;
         }
 
@@ -533,31 +537,31 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
           const res = await api.session.share({ path: { id: sessionId } });
           const data = (res as any)?.data ?? res;
           const url = data?.share?.url;
-          await adapter.sendMessage(chatId, url ? `✅ 分享链接: ${url}` : '✅ 已分享会话。');
+          await sendCommandMessage(url ? `✅ 分享链接: ${url}` : '✅ 已分享会话。');
           return;
         }
 
         if (normalizedCommand === 'unshare') {
           await api.session.unshare({ path: { id: sessionId } });
-          await adapter.sendMessage(chatId, '✅ 已取消分享。');
+          await sendCommandMessage('✅ 已取消分享。');
           return;
         }
 
         if (normalizedCommand === 'compact') {
           await api.session.summarize({ path: { id: sessionId } });
-          await adapter.sendMessage(chatId, '✅ 已触发会话压缩。');
+          await sendCommandMessage('✅ 已触发会话压缩。');
           return;
         }
 
         if (normalizedCommand === 'init') {
           await api.session.init({ path: { id: sessionId } });
-          await adapter.sendMessage(chatId, '✅ 已触发初始化（AGENTS.md）。');
+          await sendCommandMessage('✅ 已触发初始化（AGENTS.md）。');
           return;
         }
 
         const isCustom = await isKnownCustomCommand(slash.command);
         if (isCustom === false) {
-          await adapter.sendMessage(chatId, `❌ 无效指令: /${slash.command}`);
+          await sendCommandMessage(`❌ 无效指令: /${slash.command}`);
           return;
         }
 
