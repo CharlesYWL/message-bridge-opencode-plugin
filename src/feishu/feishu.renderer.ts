@@ -6,6 +6,12 @@ type FeishuCard = {
   elements: any[];
 };
 
+export type RenderedFile = {
+  filename?: string;
+  mime?: string;
+  url: string;
+};
+
 function trimSafe(s: string) {
   return (s || '').trim();
 }
@@ -123,6 +129,46 @@ function parseSections(md: string) {
   }
 
   return sectionMap;
+}
+
+export function extractFilesFromHandlerMarkdown(markdown: string): RenderedFile[] {
+  const { files } = parseSections(markdown);
+  const raw = trimSafe(files);
+  if (!raw) return [];
+
+  const lines = raw.split('\n');
+  const out: RenderedFile[] = [];
+  let current: RenderedFile | null = null;
+
+  const pushCurrent = () => {
+    if (current && current.url) out.push(current);
+    current = null;
+  };
+
+  for (const lineRaw of lines) {
+    const line = lineRaw.trim();
+    if (!line) continue;
+
+    if (line.startsWith('- ')) {
+      pushCurrent();
+      const namePart = line.slice(2).trim();
+      const match = namePart.match(/^(.*)\s+\((.+)\)$/);
+      if (match) {
+        current = { filename: match[1], mime: match[2], url: '' };
+      } else {
+        current = { filename: namePart, url: '' };
+      }
+      continue;
+    }
+
+    if (current && !current.url) {
+      current.url = line;
+      continue;
+    }
+  }
+
+  pushCurrent();
+  return out;
 }
 
 function renderHelpCommand(command: string): any[] | null {
@@ -309,7 +355,7 @@ export function renderFeishuCardFromHandlerMarkdown(handlerMarkdown: string): st
   }
 
   if (status.trim()) {
-    elements.push({ tag: 'hr' });
+    if (elements.length > 0) elements.push({ tag: 'hr' });
 
     elements.push({
       tag: 'note',

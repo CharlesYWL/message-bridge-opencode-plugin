@@ -2,6 +2,8 @@
 import * as lark from '@larksuiteoapi/node-sdk';
 import * as http from 'http';
 import * as crypto from 'crypto';
+import * as path from 'path';
+import * as https from 'https';
 
 import type { FeishuConfig, IncomingMessageHandler } from '../types';
 import type { FilePartInput } from '@opencode-ai/sdk';
@@ -12,6 +14,7 @@ import {
   globalState,
   sleep,
 } from '../utils';
+import { FeishuRenderer } from './feishu.renderer';
 
 function clip(s: string, n = 2000) {
   if (!s) return '';
@@ -54,6 +57,7 @@ export class FeishuClient {
   private httpServer: http.Server | null = null;
   private callbackUrl?: string;
   private callbackPort?: number;
+  private renderer: FeishuRenderer;
 
   constructor(config: FeishuConfig) {
     this.config = config;
@@ -61,6 +65,7 @@ export class FeishuClient {
       appId: config.app_id,
       appSecret: config.app_secret,
     });
+    this.renderer = new FeishuRenderer();
     if (config.callback_url) {
       this.callbackUrl = config.callback_url;
       try {
@@ -83,6 +88,257 @@ export class FeishuClient {
       processedMessageIds.delete(first);
     }
     return false;
+  }
+
+  private decodeDataUrl(dataUrl: string): { mime: string; buffer: Buffer } | null {
+    const match = dataUrl.match(/^data:([^;]+);base64,(.*)$/s);
+    if (!match) return null;
+    const mime = match[1];
+    const base64 = match[2];
+    try {
+      const buffer = Buffer.from(base64, 'base64');
+      return { mime, buffer };
+    } catch {
+      return null;
+    }
+  }
+
+  private inferMimeFromFilename(filename?: string): string | undefined {
+    const ext = filename ? path.extname(filename).toLowerCase() : '';
+    if (!ext) return undefined;
+    switch (ext) {
+      case '.png':
+        return 'image/png';
+      case '.jpg':
+      case '.jpeg':
+        return 'image/jpeg';
+      case '.webp':
+        return 'image/webp';
+      case '.gif':
+        return 'image/gif';
+      case '.bmp':
+        return 'image/bmp';
+      case '.tiff':
+      case '.tif':
+        return 'image/tiff';
+      case '.ico':
+        return 'image/x-icon';
+      case '.pdf':
+        return 'application/pdf';
+      case '.doc':
+        return 'application/msword';
+      case '.docx':
+        return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+      case '.xls':
+        return 'application/vnd.ms-excel';
+      case '.xlsx':
+        return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      case '.ppt':
+        return 'application/vnd.ms-powerpoint';
+      case '.pptx':
+        return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+      case '.mp4':
+        return 'video/mp4';
+      case '.opus':
+        return 'audio/opus';
+      default:
+        return undefined;
+    }
+  }
+
+  private filenameFromContentDisposition(disposition?: string): string | undefined {
+    if (!disposition) return undefined;
+    const match = disposition.match(/filename\\*=UTF-8''([^;]+)/i);
+    if (match?.[1]) return decodeURIComponent(match[1]);
+    const match2 = disposition.match(/filename=\"?([^\";]+)\"?/i);
+    return match2?.[1];
+  }
+
+  private async fetchUrlToBuffer(
+    urlStr: string,
+    maxBytes: number,
+    redirectLeft = 3
+  ): Promise<{ buffer: Buffer; mime?: string; filename?: string }> {
+    const url = new URL(urlStr);
+    const client = url.protocol === 'https:' ? https : http;
+
+    return new Promise((resolve, reject) => {
+      const req = client.get(url, res => {
+        const status = res.statusCode || 0;
+        if ([301, 302, 303, 307, 308].includes(status) && res.headers.location) {
+          if (redirectLeft <= 0) {
+            res.resume();
+            return reject(new Error('Too many redirects'));
+          }
+          const next = new URL(res.headers.location, url).toString();
+          res.resume();
+          return this.fetchUrlToBuffer(next, maxBytes, redirectLeft - 1)
+            .then(resolve)
+            .catch(reject);
+        }
+
+        if (status < 200 || status >= 300) {
+          res.resume();
+          return reject(new Error(`HTTP ${status}`));
+        }
+
+        const contentLengthRaw = res.headers['content-length'];
+        const contentLength = contentLengthRaw ? Number(contentLengthRaw) : 0;
+        if (contentLength && contentLength > maxBytes) {
+          res.resume();
+          return reject(new Error('Content too large'));
+        }
+
+        const chunks: Buffer[] = [];
+        let total = 0;
+        res.on('data', chunk => {
+          total += chunk.length;
+          if (total > maxBytes) {
+            res.destroy();
+            return reject(new Error('Content too large'));
+          }
+          chunks.push(chunk);
+        });
+        res.on('end', () => {
+          const buffer = Buffer.concat(chunks);
+          const mime =
+            (res.headers['content-type'] as string | undefined)?.split(';')[0]?.trim();
+          const filename =
+            this.filenameFromContentDisposition(
+              res.headers['content-disposition'] as string | undefined
+            ) || path.basename(url.pathname) || undefined;
+          resolve({ buffer, mime, filename });
+        });
+      });
+      req.on('error', reject);
+    });
+  }
+
+  private inferFileType(mime: string, filename?: string):
+    | 'opus'
+    | 'mp4'
+    | 'pdf'
+    | 'doc'
+    | 'xls'
+    | 'ppt'
+    | 'stream' {
+    const m = (mime || '').toLowerCase();
+    if (m.includes('audio/opus')) return 'opus';
+    if (m.includes('video/mp4')) return 'mp4';
+    if (m.includes('application/pdf')) return 'pdf';
+    if (m.includes('application/msword') || m.includes('wordprocessingml')) return 'doc';
+    if (m.includes('application/vnd.ms-excel') || m.includes('spreadsheetml')) return 'xls';
+    if (m.includes('application/vnd.ms-powerpoint') || m.includes('presentationml'))
+      return 'ppt';
+
+    const ext = filename ? path.extname(filename).toLowerCase() : '';
+    if (ext === '.opus') return 'opus';
+    if (ext === '.mp4') return 'mp4';
+    if (ext === '.pdf') return 'pdf';
+    if (ext === '.doc' || ext === '.docx') return 'doc';
+    if (ext === '.xls' || ext === '.xlsx') return 'xls';
+    if (ext === '.ppt' || ext === '.pptx') return 'ppt';
+    return 'stream';
+  }
+
+  private async sendMediaMessage(
+    chatId: string,
+    msgType: 'image' | 'file',
+    content: Record<string, string>
+  ): Promise<boolean> {
+    try {
+      const res = await this.apiClient.im.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: {
+          receive_id: chatId,
+          msg_type: msgType,
+          content: JSON.stringify(content),
+        },
+      });
+      return res.code === 0;
+    } catch (e) {
+      console.error('[Feishu] ❌ Failed to send media:', e);
+      return false;
+    }
+  }
+
+  async sendFileAttachment(
+    chatId: string,
+    file: { filename?: string; mime?: string; url: string }
+  ): Promise<boolean> {
+    const { url, filename } = file;
+    if (!url) return false;
+
+    let buffer: Buffer | null = null;
+    let mime = file.mime || '';
+    let finalName = filename || '';
+
+    if (url.startsWith('data:')) {
+      const decoded = this.decodeDataUrl(url);
+      if (!decoded) {
+        console.warn('[Feishu] ⚠️ Skip file: invalid data URL.');
+        return false;
+      }
+      buffer = decoded.buffer;
+      if (!mime) mime = decoded.mime;
+    } else if (url.startsWith('http://') || url.startsWith('https://')) {
+      const maxBytes = mime.startsWith('image/') ? 10 * 1024 * 1024 : 30 * 1024 * 1024;
+      try {
+        const res = await this.fetchUrlToBuffer(url, maxBytes);
+        buffer = res.buffer;
+        if (!mime) mime = res.mime || '';
+        if (!finalName) finalName = res.filename || '';
+      } catch (e) {
+        console.error('[Feishu] ❌ Download file failed:', e);
+        return false;
+      }
+    } else {
+      console.warn('[Feishu] ⚠️ Skip file: unsupported URL scheme.');
+      return false;
+    }
+
+    if (!buffer) return false;
+    if (!mime) mime = this.inferMimeFromFilename(finalName) || 'application/octet-stream';
+
+    if (mime.startsWith('image/')) {
+      if (buffer.length > 10 * 1024 * 1024) {
+        console.warn('[Feishu] ⚠️ Image too large (>10MB).');
+        return false;
+      }
+      try {
+        const resp = await this.apiClient.im.image.create({
+          data: { image_type: 'message', image: buffer },
+        });
+        const imageKey = resp?.image_key;
+        if (!imageKey) return false;
+        return this.sendMediaMessage(chatId, 'image', { image_key: imageKey });
+      } catch (e) {
+        console.error('[Feishu] ❌ Upload image failed:', e);
+        return false;
+      }
+    }
+
+    if (buffer.length > 30 * 1024 * 1024) {
+      console.warn('[Feishu] ⚠️ File too large (>30MB).');
+      return false;
+    }
+
+    try {
+      const fileType = this.inferFileType(mime, finalName);
+      const resp = await this.apiClient.im.file.create({
+        data: {
+          file_type: fileType,
+          file_name: finalName || 'file',
+          file: buffer,
+        },
+      });
+      const fileKey = resp?.file_key;
+      if (!fileKey) return false;
+      return this.sendMediaMessage(chatId, 'file', { file_key: fileKey });
+    } catch (e) {
+      console.error('[Feishu] ❌ Upload file failed:', e);
+      return false;
+    }
   }
 
   private parseAndCleanContent(contentJson: string, mentions?: any[]): string {
@@ -149,7 +405,7 @@ export class FeishuClient {
       if (maxRetry > 0) {
         progressMsgId = await this.sendMessage(
           chatId,
-          `## Status\n⏳ 正在处理 ${msgType} 文件：${fileName}`
+          this.renderer.render(`## Status\n正在处理 ${msgType} 文件：${fileName}`)
         );
         await sleep(500);
       }
