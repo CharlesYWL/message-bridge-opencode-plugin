@@ -23,6 +23,14 @@ function larkMd(content: string) {
   };
 }
 
+function hr() {
+  return { tag: 'hr' };
+}
+
+function spacer() {
+  return { tag: 'div', text: { tag: 'lark_md', content: ' ' } };
+}
+
 function collapsiblePanel(title: string, content: string, expanded = false) {
   const c = trimSafe(content);
   if (!c) return null;
@@ -51,6 +59,52 @@ function getStatusWithEmoji(statusText: string): string {
 
   const cleanText = statusText.replace(/\n/g, ' | ').slice(0, 100);
   return `${emoji} ${cleanText}`;
+}
+
+function splitStatusPaths(statusText: string): { status: string; paths: string[] } {
+  const lines = (statusText || '').split('\n');
+  const paths: string[] = [];
+  const keep: string[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('- ')) {
+      const p = trimmed.slice(2).trim();
+      if (p) {
+        paths.push(p);
+        continue;
+      }
+    }
+    keep.push(line);
+  }
+
+  return { status: keep.join('\n').trim(), paths };
+}
+
+function pickHeaderForStatus(statusRaw: string): { title: string; color: string } {
+  const statusText = trimSafe(statusRaw).toLowerCase();
+  const isFail =
+    statusText.includes('失败') ||
+    statusText.includes('error') ||
+    statusText.includes('fail') ||
+    statusText.includes('❌');
+  const isSuccess =
+    statusText.includes('成功') ||
+    statusText.includes('已保存') ||
+    statusText.includes('已存在') ||
+    statusText.includes('✅') ||
+    statusText.includes('🟡');
+  const isProcessing =
+    statusText.includes('正在处理') ||
+    statusText.includes('处理中') ||
+    statusText.includes('processing') ||
+    statusText.includes('loading') ||
+    statusText.includes('⏳');
+
+  if (isFail) return { title: '🚨 Error', color: 'red' };
+  if (isSuccess) return { title: '✅ Saved', color: 'green' };
+  if (isProcessing) return { title: '⏳ Loading', color: 'orange' };
+  return { title: '📝 Status', color: 'blue' };
 }
 
 function parseSections(md: string) {
@@ -193,13 +247,7 @@ function renderHelpCommand(command: string): any[] | null {
 
   elements.push(larkMd('**Help**'));
   elements.push(
-    larkMd(
-      [
-        '```text',
-        ...commandLines.map(l => l.replace(/^-\\s*/, '')),
-        '```',
-      ].join('\n')
-    )
+    larkMd(['```text', ...commandLines.map(l => l.replace(/^-\\s*/, '')), '```'].join('\n')),
   );
   return elements;
 }
@@ -275,8 +323,9 @@ export function renderFeishuCardFromHandlerMarkdown(handlerMarkdown: string): st
     headerTitle = '🚨 Error';
     headerColor = 'red';
   } else if (hasOnlyStatus && trimSafe(status)) {
-    headerTitle = '⏳ Loading';
-    headerColor = 'orange';
+    const picked = pickHeaderForStatus(status);
+    headerTitle = picked.title;
+    headerColor = picked.color;
   } else if (trimSafe(command)) {
     headerTitle = '🧭 Command';
     headerColor = 'green';
@@ -296,12 +345,12 @@ export function renderFeishuCardFromHandlerMarkdown(handlerMarkdown: string): st
   }
 
   if (tools.trim()) {
-    if (elements.length > 0) elements.push({ tag: 'div', text: { tag: 'lark_md', content: ' ' } });
+    if (elements.length > 0) elements.push(spacer());
     elements.push(collapsiblePanel('⚙️ Execution', tools, false));
   }
 
   if (files.trim()) {
-    if (elements.length > 0) elements.push({ tag: 'div', text: { tag: 'lark_md', content: ' ' } });
+    if (elements.length > 0) elements.push(spacer());
     elements.push(collapsiblePanel('🖼️ Files', files, false));
   }
 
@@ -338,7 +387,7 @@ export function renderFeishuCardFromHandlerMarkdown(handlerMarkdown: string): st
   }
 
   if (finalAnswer) {
-    if (elements.length > 0) elements.push({ tag: 'hr' });
+    if (elements.length > 0) elements.push(hr());
 
     elements.push({
       tag: 'div',
@@ -355,12 +404,27 @@ export function renderFeishuCardFromHandlerMarkdown(handlerMarkdown: string): st
   }
 
   if (status.trim()) {
-    if (elements.length > 0) elements.push({ tag: 'hr' });
+    const { status: cleanStatus, paths } = splitStatusPaths(status.trim());
 
-    elements.push({
-      tag: 'note',
-      elements: [{ tag: 'plain_text', content: getStatusWithEmoji(status.trim()) }],
-    });
+    if (paths.length > 0) {
+      if (cleanStatus) {
+        elements.push({
+          tag: 'div',
+          text: { tag: 'lark_md', content: cleanStatus },
+        });
+      }
+      elements.push(hr());
+      elements.push({
+        tag: 'note',
+        elements: [{ tag: 'plain_text', content: paths.join('\n') }],
+      });
+    } else {
+      if (elements.length > 0) elements.push(hr());
+      elements.push({
+        tag: 'note',
+        elements: [{ tag: 'plain_text', content: getStatusWithEmoji(cleanStatus) }],
+      });
+    }
   }
 
   const card: FeishuCard = {

@@ -1,5 +1,6 @@
 // src/feishu/feishuClient.ts
 import * as lark from '@larksuiteoapi/node-sdk';
+import axios from 'axios';
 import * as http from 'http';
 import * as crypto from 'crypto';
 import * as path from 'path';
@@ -15,6 +16,8 @@ import {
   sleep,
 } from '../utils';
 import { FeishuRenderer } from './feishu.renderer';
+import { fetchFeishuResourceToBuffer } from './feishuHttp';
+import { LoggerLevel } from '@larksuiteoapi/node-sdk';
 
 function clip(s: string, n = 2000) {
   if (!s) return '';
@@ -58,13 +61,26 @@ export class FeishuClient {
   private callbackUrl?: string;
   private callbackPort?: number;
   private renderer: FeishuRenderer;
+  private tenantToken?: string;
+  private tenantTokenExpiresAt?: number;
+  private refreshTenantTokenPromise?: Promise<string>;
 
   constructor(config: FeishuConfig) {
     this.config = config;
+    const httpAgent = new http.Agent({ keepAlive: true });
+    const httpsAgent = new https.Agent({ keepAlive: true });
+    const httpInstance = lark.defaultHttpInstance;
+    httpInstance.defaults.timeout = 120000;
+    httpInstance.defaults.httpAgent = httpAgent;
+    httpInstance.defaults.httpsAgent = httpsAgent;
+
     this.apiClient = new lark.Client({
       appId: config.app_id,
       appSecret: config.app_secret,
+      httpInstance,
+      loggerLevel: LoggerLevel.info,
     });
+
     this.renderer = new FeishuRenderer();
     if (config.callback_url) {
       this.callbackUrl = config.callback_url;
@@ -157,79 +173,62 @@ export class FeishuClient {
   private async fetchUrlToBuffer(
     urlStr: string,
     maxBytes: number,
-    redirectLeft = 3
+    redirectLeft = 3,
   ): Promise<{ buffer: Buffer; mime?: string; filename?: string }> {
     const url = new URL(urlStr);
-    const client = url.protocol === 'https:' ? https : http;
-
-    return new Promise((resolve, reject) => {
-      const req = client.get(url, res => {
-        const status = res.statusCode || 0;
-        if ([301, 302, 303, 307, 308].includes(status) && res.headers.location) {
-          if (redirectLeft <= 0) {
-            res.resume();
-            return reject(new Error('Too many redirects'));
-          }
-          const next = new URL(res.headers.location, url).toString();
-          res.resume();
-          return this.fetchUrlToBuffer(next, maxBytes, redirectLeft - 1)
-            .then(resolve)
-            .catch(reject);
-        }
-
-        if (status < 200 || status >= 300) {
-          res.resume();
-          return reject(new Error(`HTTP ${status}`));
-        }
-
-        const contentLengthRaw = res.headers['content-length'];
-        const contentLength = contentLengthRaw ? Number(contentLengthRaw) : 0;
-        if (contentLength && contentLength > maxBytes) {
-          res.resume();
-          return reject(new Error('Content too large'));
-        }
-
-        const chunks: Buffer[] = [];
-        let total = 0;
-        res.on('data', chunk => {
-          total += chunk.length;
-          if (total > maxBytes) {
-            res.destroy();
-            return reject(new Error('Content too large'));
-          }
-          chunks.push(chunk);
-        });
-        res.on('end', () => {
-          const buffer = Buffer.concat(chunks);
-          const mime =
-            (res.headers['content-type'] as string | undefined)?.split(';')[0]?.trim();
-          const filename =
-            this.filenameFromContentDisposition(
-              res.headers['content-disposition'] as string | undefined
-            ) || path.basename(url.pathname) || undefined;
-          resolve({ buffer, mime, filename });
-        });
-      });
-      req.on('error', reject);
+    const res = await axios.get(url.toString(), {
+      responseType: 'arraybuffer',
+      timeout: 120000,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+      validateStatus: () => true,
     });
+
+    const status = res.status || 0;
+    if (status < 200 || status >= 300) {
+      throw new Error(`HTTP ${status}`);
+    }
+
+    const contentLengthRaw = res.headers?.['content-length'];
+    const contentLength = contentLengthRaw ? Number(contentLengthRaw) : 0;
+    if (contentLength && contentLength > maxBytes) {
+      throw new Error('Content too large');
+    }
+
+    const buffer: Buffer = Buffer.isBuffer(res.data) ? res.data : Buffer.from(res.data || '');
+    if (buffer.length > maxBytes) {
+      throw new Error('Content too large');
+    }
+
+    const mime = (res.headers?.['content-type'] as string | undefined)?.split(';')[0]?.trim();
+    const filename =
+      this.filenameFromContentDisposition(res.headers?.['content-disposition'] as string) ||
+      path.basename(url.pathname) ||
+      undefined;
+    return { buffer, mime, filename };
   }
 
-  private inferFileType(mime: string, filename?: string):
-    | 'opus'
-    | 'mp4'
-    | 'pdf'
-    | 'doc'
-    | 'xls'
-    | 'ppt'
-    | 'stream' {
+  private async getTenantToken(): Promise<string> {
+    if (!this.tenantToken || this.isTenantTokenExpired()) {
+      await this.refreshTenantToken();
+    }
+    if (!this.tenantToken) {
+      throw new Error('[Feishu] Missing tenant_access_token');
+    }
+    return this.tenantToken;
+  }
+
+  private inferFileType(
+    mime: string,
+    filename?: string,
+  ): 'opus' | 'mp4' | 'pdf' | 'doc' | 'xls' | 'ppt' | 'stream' {
     const m = (mime || '').toLowerCase();
     if (m.includes('audio/opus')) return 'opus';
     if (m.includes('video/mp4')) return 'mp4';
     if (m.includes('application/pdf')) return 'pdf';
     if (m.includes('application/msword') || m.includes('wordprocessingml')) return 'doc';
     if (m.includes('application/vnd.ms-excel') || m.includes('spreadsheetml')) return 'xls';
-    if (m.includes('application/vnd.ms-powerpoint') || m.includes('presentationml'))
-      return 'ppt';
+    if (m.includes('application/vnd.ms-powerpoint') || m.includes('presentationml')) return 'ppt';
 
     const ext = filename ? path.extname(filename).toLowerCase() : '';
     if (ext === '.opus') return 'opus';
@@ -244,22 +243,27 @@ export class FeishuClient {
   private async sendMediaMessage(
     chatId: string,
     msgType: 'image' | 'file',
-    content: Record<string, string>
+    content: Record<string, string>,
   ): Promise<boolean> {
     try {
       console.log(
         `[Feishu] 📤 sendMediaMessage type=${msgType} chat=${chatId} content=${JSON.stringify(
-          content
-        )}`
+          content,
+        )}`,
       );
-      const res = await this.apiClient.im.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: chatId,
-          msg_type: msgType,
-          content: JSON.stringify(content),
-        },
-      });
+      const res = await this.runWithTenantRetry(options =>
+        this.apiClient.im.message.create(
+          {
+            params: { receive_id_type: 'chat_id' },
+            data: {
+              receive_id: chatId,
+              msg_type: msgType,
+              content: JSON.stringify(content),
+            },
+          },
+          options,
+        ),
+      );
       return res.code === 0;
     } catch (e) {
       console.error('[Feishu] ❌ Failed to send media:', e);
@@ -269,7 +273,7 @@ export class FeishuClient {
 
   async sendFileAttachment(
     chatId: string,
-    file: { filename?: string; mime?: string; url: string }
+    file: { filename?: string; mime?: string; url: string },
   ): Promise<boolean> {
     const { url, filename } = file;
     if (!url) return false;
@@ -277,12 +281,12 @@ export class FeishuClient {
     console.log(
       `[Feishu] 📎 sendFileAttachment url=${url.slice(0, 120)}${
         url.length > 120 ? '...' : ''
-      } filename=${filename || ''} mime=${file.mime || ''}`
+      } filename=${filename || ''} mime=${file.mime || ''}`,
     );
     console.log(
       `[Feishu] 🌐 proxy http_proxy=${process.env.http_proxy || ''} https_proxy=${
         process.env.https_proxy || ''
-      } NO_PROXY=${process.env.NO_PROXY || process.env.no_proxy || ''}`
+      } NO_PROXY=${process.env.NO_PROXY || process.env.no_proxy || ''}`,
     );
 
     let buffer: Buffer | null = null;
@@ -307,7 +311,7 @@ export class FeishuClient {
         if (!mime) mime = res.mime || '';
         if (!finalName) finalName = res.filename || '';
         console.log(
-          `[Feishu] ✅ download ok size=${buffer.length} mime=${mime} filename=${finalName}`
+          `[Feishu] ✅ download ok size=${buffer.length} mime=${mime} filename=${finalName}`,
         );
       } catch (e) {
         console.error('[Feishu] ❌ Download file failed:', e);
@@ -328,11 +332,16 @@ export class FeishuClient {
       }
       try {
         console.log(
-          `[Feishu] ⬆️ uploading image size=${buffer.length} mime=${mime} name=${finalName}`
+          `[Feishu] ⬆️ uploading image size=${buffer.length} mime=${mime} name=${finalName}`,
         );
-        const resp = await this.apiClient.im.image.create({
-          data: { image_type: 'message', image: buffer },
-        });
+        const resp = await this.runWithTenantRetry(options =>
+          this.apiClient.im.image.create(
+            {
+              data: { image_type: 'message', image: buffer },
+            },
+            options,
+          ),
+        );
         const imageKey = resp?.image_key;
         console.log(`[Feishu] ✅ upload image ok image_key=${imageKey || ''}`);
         if (!imageKey) return false;
@@ -351,15 +360,20 @@ export class FeishuClient {
     try {
       const fileType = this.inferFileType(mime, finalName);
       console.log(
-        `[Feishu] ⬆️ uploading file size=${buffer.length} mime=${mime} type=${fileType} name=${finalName}`
+        `[Feishu] ⬆️ uploading file size=${buffer.length} mime=${mime} type=${fileType} name=${finalName}`,
       );
-      const resp = await this.apiClient.im.file.create({
-        data: {
-          file_type: fileType,
-          file_name: finalName || 'file',
-          file: buffer,
-        },
-      });
+      const resp = await this.runWithTenantRetry(options =>
+        this.apiClient.im.file.create(
+          {
+            data: {
+              file_type: fileType,
+              file_name: finalName || 'file',
+              file: buffer,
+            },
+          },
+          options,
+        ),
+      );
       const fileKey = resp?.file_key;
       console.log(`[Feishu] ✅ upload file ok file_key=${fileKey || ''}`);
       if (!fileKey) return false;
@@ -389,22 +403,92 @@ export class FeishuClient {
     }
   }
 
-  private async readStreamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
-    const chunks: Buffer[] = [];
-    return new Promise((resolve, reject) => {
-      stream.on('data', chunk => chunks.push(Buffer.from(chunk)));
-      stream.on('end', () => resolve(Buffer.concat(chunks)));
-      stream.on('error', reject);
-    });
+  private isTenantTokenExpired(): boolean {
+    if (!this.tenantTokenExpiresAt) return false;
+    return Date.now() >= this.tenantTokenExpiresAt - 60 * 1000 - 1000;
+  }
+
+  private async refreshTenantToken(): Promise<string> {
+    if (this.refreshTenantTokenPromise) return this.refreshTenantTokenPromise;
+    this.refreshTenantTokenPromise = (async () => {
+      const res = await this.apiClient.auth.tenantAccessToken.internal({
+        data: {
+          app_id: this.config.app_id,
+          app_secret: this.config.app_secret,
+        },
+      });
+      const token = (res as any)?.data?.tenant_access_token || (res as any)?.tenant_access_token;
+      const expiresInRaw =
+        (res as any)?.data?.expire ||
+        (res as any)?.data?.expires_in ||
+        (res as any)?.data?.expire_in ||
+        (res as any)?.expire ||
+        (res as any)?.expires_in ||
+        (res as any)?.expire_in;
+      const expiresIn = expiresInRaw ? Number(expiresInRaw) : 0;
+      if (!token) {
+        this.refreshTenantTokenPromise = undefined;
+        throw new Error(`[Feishu] Failed to refresh tenant token: ${JSON.stringify(res)}`);
+      }
+      this.tenantToken = token;
+      if (expiresIn > 0) {
+        this.tenantTokenExpiresAt = Date.now() + expiresIn * 1000;
+      } else {
+        this.tenantTokenExpiresAt = undefined;
+      }
+      this.refreshTenantTokenPromise = undefined;
+      return token;
+    })();
+    return this.refreshTenantTokenPromise;
+  }
+
+  private shouldRefreshTenantToken(error: any): boolean {
+    const data = error?.response?.data || error?.data;
+    const code = data?.code;
+    const msg = String(data?.msg || data?.message || error?.message || '');
+    if ([99991663, 99991664, 99991665, 99991671, 99991672, 99991673].includes(code)) {
+      return true;
+    }
+    if (
+      /tenant_access_token|access token|token invalid|invalid token|token expired|expire/i.test(msg)
+    ) {
+      return true;
+    }
+    if (error?.response?.status === 401) return true;
+    return false;
+  }
+
+  private async requestOptions(): Promise<any | undefined> {
+    if (!this.tenantToken || this.isTenantTokenExpired()) {
+      await this.refreshTenantToken();
+    }
+    return this.tenantToken ? lark.withTenantToken(this.tenantToken) : undefined;
+  }
+
+  private async runWithTenantRetry<T>(fn: (options?: any) => Promise<T>): Promise<T> {
+    const options = await this.requestOptions();
+    try {
+      return await fn(options);
+    } catch (e) {
+      if (!this.shouldRefreshTenantToken(e)) throw e;
+      console.warn('[Feishu] 🔄 tenant_access_token expired, refreshing...');
+      await this.refreshTenantToken();
+      console.info('[Feishu] ✅ tenant_access_token refreshed.');
+      const retryOptions = this.tenantToken ? lark.withTenantToken(this.tenantToken) : undefined;
+      return await fn(retryOptions);
+    }
   }
 
   private async buildFilePart(
     messageId: string,
     msgType: string,
     contentJson: string,
-    chatId: string
+    chatId: string,
   ): Promise<FilePartInput | null> {
     let content: any;
+
+    console.info('buildFilePart prams', { messageId, msgType, contentJson, chatId });
+
     try {
       content = JSON.parse(contentJson);
     } catch {
@@ -418,87 +502,112 @@ export class FeishuClient {
       content.file_name || content.name || content.fileName || `${msgType}-${fileKey}`;
 
     let progressMsgId: string | null = null;
+    const progressMap: Map<string, string> =
+      globalState.__bridge_progress_msg_ids || new Map<string, string>();
+    globalState.__bridge_progress_msg_ids = progressMap;
+
+    const progressKey = messageId;
     try {
       console.log(
-        `[Feishu] 📦 Download resource start: msg=${messageId} type=${msgType} key=${fileKey} name=${fileName}`
+        `[Feishu] 📦 Download resource start: msg=${messageId} type=${msgType} key=${fileKey} name=${fileName}`,
       );
       const maxSizeMb =
-        (globalState.__bridge_max_file_size?.get?.(chatId) as number) ??
-        DEFAULT_MAX_FILE_MB;
+        (globalState.__bridge_max_file_size?.get?.(chatId) as number) ?? DEFAULT_MAX_FILE_MB;
       const maxBytes = Math.floor(maxSizeMb * 1024 * 1024);
 
       let res: any;
       const maxRetry =
-        (globalState.__bridge_max_file_retry?.get?.(chatId) as number) ??
-        DEFAULT_MAX_FILE_RETRY;
+        (globalState.__bridge_max_file_retry?.get?.(chatId) as number) ?? DEFAULT_MAX_FILE_RETRY;
+
       if (maxRetry > 0) {
         progressMsgId = await this.sendMessage(
           chatId,
-          this.renderer.render(`## Status\n正在处理 ${msgType} 文件：${fileName}`)
+          this.renderer.render(`## Status\n⏳ 正在处理 ${msgType} 文件：${fileName}`),
         );
-        await sleep(500);
+        if (progressMsgId) {
+          progressMap.set(progressKey, progressMsgId);
+        }
       }
+
       for (let attempt = 0; attempt <= maxRetry; attempt++) {
         try {
-          res = await this.apiClient.im.messageResource.get(
-            {
-              path: { message_id: messageId, file_key: fileKey },
-              params: { type: msgType },
-            },
-            { timeout: 20000 }
-          );
+          res = await this.runWithTenantRetry(async () => {
+            const tenantToken = await this.getTenantToken();
+            return fetchFeishuResourceToBuffer({
+              messageId,
+              fileKey,
+              msgType,
+              maxBytes,
+              tenantToken,
+              timeoutMs: 120000,
+            });
+          });
           break;
         } catch (e) {
           if (attempt >= maxRetry) throw e;
           await sleep(500 * (attempt + 1));
         }
       }
+
       const contentLengthRaw = res.headers?.['content-length'];
       const contentLength = contentLengthRaw ? Number(contentLengthRaw) : 0;
+
       if (contentLength && contentLength > maxBytes) {
         await this.sendMessage(
           chatId,
           `❌ 文件过大（${(contentLength / 1024 / 1024).toFixed(
-            2
-          )}MB），当前限制 ${maxSizeMb}MB。可用 /maxFileSize <xmb> 调整。`
+            2,
+          )}MB），当前限制 ${maxSizeMb}MB。可用 /maxFileSize <xmb> 调整。`,
         );
         console.warn(
-          `[Feishu] ⚠️ Resource too large by header: ${contentLength} bytes > ${maxBytes}`
+          `[Feishu] ⚠️ Resource too large by header: ${contentLength} bytes > ${maxBytes}`,
         );
         if (progressMsgId) {
-          await this.apiClient.im.message
-            .delete({ path: { message_id: progressMsgId } })
-            .catch(() => {});
+          await this.editMessage(
+            chatId,
+            progressMsgId,
+            this.renderer.render(
+              `## Status\n❌ 文件过大（${(contentLength / 1024 / 1024).toFixed(
+                2,
+              )}MB），当前限制 ${maxSizeMb}MB。`,
+            ),
+          ).catch(() => {});
+          progressMap.delete(progressKey);
         }
         return null;
       }
-      const stream = res.getReadableStream();
-      const buf = await this.readStreamToBuffer(stream);
+
+      const buf = res.buffer as Buffer;
+
       if (buf.length > maxBytes) {
         await this.sendMessage(
           chatId,
           `❌ 文件过大（${(buf.length / 1024 / 1024).toFixed(
-            2
-          )}MB），当前限制 ${maxSizeMb}MB。可用 /maxFileSize <xmb> 调整。`
+            2,
+          )}MB），当前限制 ${maxSizeMb}MB。可用 /maxFileSize <xmb> 调整。`,
         );
         console.warn(`[Feishu] ⚠️ Resource too large by body: ${buf.length} bytes > ${maxBytes}`);
         if (progressMsgId) {
-          await this.apiClient.im.message
-            .delete({ path: { message_id: progressMsgId } })
-            .catch(() => {});
+          await this.editMessage(
+            chatId,
+            progressMsgId,
+            this.renderer.render(
+              `## Status\n❌ 文件过大（${(buf.length / 1024 / 1024).toFixed(
+                2,
+              )}MB），当前限制 ${maxSizeMb}MB。`,
+            ),
+          ).catch(() => {});
+          progressMap.delete(progressKey);
         }
         return null;
       }
-      const mime = (res.headers?.['content-type'] as string) || 'application/octet-stream';
+
+      const mime =
+        res.mime || (res.headers?.['content-type'] as string) || 'application/octet-stream';
       const url = `data:${mime};base64,${buf.toString('base64')}`;
-      console.log(
-        `[Feishu] ✅ Download resource ok: size=${buf.length} bytes mime=${mime}`
-      );
-      if (progressMsgId) {
-        await this.apiClient.im.message
-          .delete({ path: { message_id: progressMsgId } })
-          .catch(() => {});
-      }
+
+      console.log(`[Feishu] ✅ Download resource ok: size=${buf.length} bytes mime=${mime}`);
+
       return {
         type: 'file',
         mime,
@@ -514,9 +623,12 @@ export class FeishuClient {
         error: e,
       });
       if (progressMsgId) {
-        await this.apiClient.im.message
-          .delete({ path: { message_id: progressMsgId } })
-          .catch(() => {});
+        await this.editMessage(
+          chatId,
+          progressMsgId,
+          this.renderer.render('## Status\n❌ 文件上传失败，请重试。'),
+        ).catch(() => {});
+        progressMap.delete(progressKey);
       }
       const sendError = globalState.__bridge_send_error_message as
         | ((chatId: string, content: string) => Promise<void>)
@@ -562,14 +674,19 @@ export class FeishuClient {
 
       const finalContent = isCard ? text : this.makeCard(text);
 
-      const res = await this.apiClient.im.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: chatId,
-          msg_type: 'interactive', // 永远使用 interactive
-          content: finalContent,
-        },
-      });
+      const res = await this.runWithTenantRetry(options =>
+        this.apiClient.im.message.create(
+          {
+            params: { receive_id_type: 'chat_id' },
+            data: {
+              receive_id: chatId,
+              msg_type: 'interactive', // 永远使用 interactive
+              content: finalContent,
+            },
+          },
+          options,
+        ),
+      );
       if (res.code === 0 && res.data?.message_id) return res.data.message_id;
       console.error('[Feishu] ❌ Send failed:', res);
       return null;
@@ -581,12 +698,17 @@ export class FeishuClient {
 
   async editMessage(chatId: string, messageId: string, text: string): Promise<boolean> {
     try {
-      const res = await this.apiClient.im.message.patch({
-        path: { message_id: messageId },
-        data: {
-          content: text,
-        },
-      });
+      const res = await this.runWithTenantRetry(options =>
+        this.apiClient.im.message.patch(
+          {
+            path: { message_id: messageId },
+            data: {
+              content: text,
+            },
+          },
+          options,
+        ),
+      );
 
       return res.code === 0;
     } catch {
@@ -596,10 +718,15 @@ export class FeishuClient {
 
   async addReaction(messageId: string, emojiType: string): Promise<string | null> {
     try {
-      const res = await this.apiClient.im.messageReaction.create({
-        path: { message_id: messageId },
-        data: { reaction_type: { emoji_type: emojiType } },
-      });
+      const res = await this.runWithTenantRetry(options =>
+        this.apiClient.im.messageReaction.create(
+          {
+            path: { message_id: messageId },
+            data: { reaction_type: { emoji_type: emojiType } },
+          },
+          options,
+        ),
+      );
       return res.data?.reaction_id || null;
     } catch {
       return null;
@@ -609,9 +736,14 @@ export class FeishuClient {
   async removeReaction(messageId: string, reactionId: string) {
     if (!reactionId) return;
     try {
-      await this.apiClient.im.messageReaction.delete({
-        path: { message_id: messageId, reaction_id: reactionId },
-      });
+      await this.runWithTenantRetry(options =>
+        this.apiClient.im.messageReaction.delete(
+          {
+            path: { message_id: messageId, reaction_id: reactionId },
+          },
+          options,
+        ),
+      );
     } catch {
       // ignore
     }
@@ -623,11 +755,12 @@ export class FeishuClient {
     this.wsClient = new lark.WSClient({
       appId: this.config.app_id,
       appSecret: this.config.app_secret,
-      loggerLevel: lark.LoggerLevel.info,
+      loggerLevel: lark.LoggerLevel.trace,
     });
 
     const dispatcher = new lark.EventDispatcher({}).register({
       'im.message.receive_v1': async data => {
+        console.info('.message.receive--->', data);
         const { message, sender } = data;
         const messageId = message.message_id;
         const chatId = message.chat_id;
@@ -639,14 +772,19 @@ export class FeishuClient {
         if (msgType === 'text') {
           const text = this.parseAndCleanContent(message.content, message.mentions);
           if (!text) return;
+          console.log(
+            `[Feishu] 📥 ws text chat=${chatId} msg=${messageId} sender=${senderId} len=${text.length}`,
+          );
           await onMessage(chatId, text, messageId, senderId);
           return;
         }
 
         const part = await this.buildFilePart(messageId, msgType, message.content, chatId);
         if (!part) return;
-        const text = `收到 ${msgType} 文件：${part.filename || ''}`;
-        await onMessage(chatId, text, messageId, senderId, [part]);
+        console.log(
+          `[Feishu] 📥 ws file chat=${chatId} msg=${messageId} sender=${senderId} type=${msgType} name=${part.filename || ''} mime=${part.mime || ''}`,
+        );
+        await onMessage(chatId, '', messageId, senderId, [part]);
       },
     });
 
@@ -695,14 +833,16 @@ export class FeishuClient {
             const senderId = event.sender?.sender_id?.open_id || '';
 
             if (messageId && chatId && !this.isMessageProcessed(messageId)) {
-              const msgType =
-                event.message?.message_type || event.message?.msg_type || 'text';
+              const msgType = event.message?.message_type || event.message?.msg_type || 'text';
               if (msgType === 'text') {
                 const text = this.parseAndCleanContent(
                   event.message.content,
-                  event.message.mentions
+                  event.message.mentions,
                 );
                 if (text) {
+                  console.log(
+                    `[Feishu] 📥 webhook text chat=${chatId} msg=${messageId} sender=${senderId} len=${text.length}`,
+                  );
                   onMessage(chatId, text, messageId, senderId).catch(err => {
                     console.error('[Feishu Webhook] ❌ Handler Error:', err);
                   });
@@ -712,11 +852,13 @@ export class FeishuClient {
                   messageId,
                   msgType,
                   event.message.content,
-                  chatId
+                  chatId,
                 );
                 if (!part) return;
-                const text = `收到 ${msgType} 文件：${part.filename || ''}`;
-                onMessage(chatId, text, messageId, senderId, [part]).catch(err => {
+                console.log(
+                  `[Feishu] 📥 webhook file chat=${chatId} msg=${messageId} sender=${senderId} type=${msgType} name=${part.filename || ''} mime=${part.mime || ''}`,
+                );
+                onMessage(chatId, '', messageId, senderId, [part]).catch(err => {
                   console.error('[Feishu Webhook] ❌ Handler Error:', err);
                 });
               }

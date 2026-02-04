@@ -48,6 +48,8 @@ function parseFeishuConfig(cfg: Config): FeishuConfig {
     mode,
     callback_url: callbackUrl,
     encrypt_key: options.encrypt_key,
+    tenant_token: options.tenant_token,
+    disable_token_cache: options.disable_token_cache,
   };
 }
 
