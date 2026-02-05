@@ -13,6 +13,7 @@ import {
   applyPartToBuffer,
   shouldFlushNow,
 } from '../bridge/buffer';
+import { drainPendingFileParts, saveFilePartToLocal } from '../bridge/fileStore';
 
 import { ERROR_HEADER, parseSlashCommand, sleep, globalState } from '../utils';
 
@@ -335,7 +336,9 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
     senderId: string,
     parts?: Array<TextPartInput | FilePartInput>
   ) => {
-    console.log(`[Bridge] 📥 [${adapterKey}] Incoming: "${text}" chat=${chatId}`);
+    console.log(
+      `[Bridge] 📥 [${adapterKey}] Incoming chat=${chatId} sender=${senderId} msg=${messageId} text="${text || ''}" parts=${parts?.length || 0}`,
+    );
 
     const slash = parseSlashCommand(text);
     const cacheKey = `${adapterKey}:${chatId}`;
@@ -451,6 +454,80 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
         if (handled) return;
       }
 
+      const fileParts = (parts || []).filter(p => (p as any)?.type === 'file') as FilePartInput[];
+      const hasText = Boolean(text && text.trim());
+
+      if (fileParts.length > 0) {
+        console.log(
+          `[Bridge] 📎 [${adapterKey}] file parts detail count=${fileParts.length} chat=${chatId}`,
+        );
+        fileParts.forEach((p, idx) => {
+          console.log(
+            `[Bridge] 📎 [${adapterKey}] file[${idx}] name=${p.filename || ''} mime=${p.mime || ''} url=${(p.url || '').slice(0, 64)}${(p.url || '').length > 64 ? '...' : ''}`,
+          );
+        });
+
+        const saved: string[] = [];
+        const duplicated: string[] = [];
+        let failed = 0;
+
+        console.log(
+          `[Bridge] 📁 [${adapterKey}] received ${fileParts.length} file(s) chat=${chatId}`,
+        );
+
+        for (const p of fileParts) {
+          const res = await saveFilePartToLocal(cacheKey, p);
+          if (res.ok && res.record) {
+            if (res.duplicated) duplicated.push(res.record.path);
+            else saved.push(res.record.path);
+          } else {
+            failed++;
+          }
+        }
+
+        if (!hasText) {
+          console.log(
+            `[Bridge] 📁 [${adapterKey}] file-only message chat=${chatId} saved=${saved.length} duplicated=${duplicated.length} failed=${failed}`,
+          );
+          const lines: string[] = [];
+          if (saved.length > 0 && failed === 0 && duplicated.length === 0) {
+            lines.push(
+              `## Status\n✅ 图片/文件保存成功：\n${saved
+                .map(p => `- ${p}`)
+                .join('\n')}\n⏳ 等候指令。`
+            );
+          } else if (saved.length === 0 && duplicated.length === 0) {
+            lines.push('## Status\n❌ 文件上传失败，请重试。');
+          } else {
+            lines.push('## Status');
+            if (saved.length > 0) {
+              lines.push(`✅ 已保存：\n${saved.map(p => `- ${p}`).join('\n')}`);
+            }
+            if (duplicated.length > 0) {
+              lines.push(
+                `🟡 已存在，未重复入队：\n${duplicated.map(p => `- ${p}`).join('\n')}`
+              );
+            }
+            if (failed > 0) lines.push('❌ 部分文件上传失败，请重试。');
+          }
+
+          const content = lines.join('\n');
+          const progressMap: Map<string, string> | undefined = globalState.__bridge_progress_msg_ids;
+          const progressKey = messageId;
+          const progressMsgId = progressMap?.get(progressKey);
+          if (progressMsgId && adapter.editMessage) {
+            const ok = await adapter.editMessage(chatId, progressMsgId, content);
+            if (ok) {
+              progressMap?.delete(progressKey);
+              return;
+            }
+          }
+
+          await adapter.sendMessage(chatId, content);
+          return;
+        }
+      }
+
       const sessionId = await ensureSession();
       // ✅ 绑定：这个 session 的输出回到哪个平台
       sessionToAdapterKey.set(sessionId, adapterKey);
@@ -461,11 +538,18 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
       if (text && text.trim()) {
         partList.push({ type: 'text', text });
       }
-      if (parts && parts.length > 0) {
-        partList.push(...parts);
+      const pendingFiles = await drainPendingFileParts(cacheKey);
+      if (pendingFiles.length > 0) {
+        console.log(
+          `[Bridge] 📤 [${adapterKey}] attach pending files count=${pendingFiles.length} chat=${chatId}`,
+        );
+        partList.push(...pendingFiles);
       }
       if (partList.length === 0) return;
 
+      console.log(
+        `[Bridge] 🚀 [${adapterKey}] prompt parts=${partList.length} text=${hasText} files=${pendingFiles.length} chat=${chatId}`,
+      );
       await api.session.prompt({
         path: { id: sessionId },
         body: { parts: partList, ...(agent ? { agent } : {}) },
