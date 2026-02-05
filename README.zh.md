@@ -1,5 +1,9 @@
 # OpenCode 消息桥插件（Message Bridge）
 
+[English](https://github.com/YuanG1944/message-bridge-opencode-plugin/blob/main/README.md) | [中文](https://github.com/YuanG1944/message-bridge-opencode-plugin/blob/main/README.zh.md)
+
+---
+
 `message-bridge-opencode-plugin` 是一个为 **OpenCode Agent** 设计的 **通用消息桥插件**。
 它的目标是让 AI Agent 可以通过 **统一的抽象层** 接入多个即时通讯平台。
 
@@ -10,13 +14,15 @@
 
 ## ✨ 当前状态
 
-### ✅ 已完全支持（可用于生产）
+### ✅ 已完全支持
 
 * **飞书 / Feishu / Lark**
 
   * 功能完整、稳定
+  * 支持图片/文件解析
+  * 支持 '/' 命令
   * 支持 **Webhook** 与 **WebSocket** 两种模式
-  * 已完整适配 OpenCode 插件体系
+  * 适配 OpenCode 插件体系
 
 ### 🚧 开发中（优先级排序）
 
@@ -24,8 +30,7 @@
 * 其他计划中的平台：
 
   * Telegram
-  * Slack
-  * Discord
+  * QQ
   * WhatsApp（取决于 API 可用性）
 
 > 插件架构已为多平台扩展做好设计，后续平台会逐步接入。
@@ -142,50 +147,9 @@ npm install message-bridge-opencode-plugin
 > **注意：**
 > 强烈建议所有配置项均使用 **字符串类型**，以避免解析问题。
 
-### 飞书（Webhook 模式）
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["message-bridge-opencode-plugin"],
-  "agent": {
-    "lark-bridge": {
-      "disable": false,
-      "description": "Message Bridge Plugin",
-      "options": {
-        "platform": "feishu",
-        "mode": "webhook",
-        "app_id": "cli_xxxxxxx",
-        "app_secret": "xxxxxxxxxx",
-        "callback_url": "127.0.0.1:3000"
-      }
-    }
-  }
-}
-```
-
-### 飞书（WebSocket 模式）
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["message-bridge-opencode-plugin"],
-  "agent": {
-    "lark-bridge": {
-      "disable": false,
-      "description": "Message Bridge Plugin",
-      "options": {
-        "platform": "feishu",
-        "mode": "ws",
-        "app_id": "cli_xxxxxxx",
-        "app_secret": "xxxxxxxxxx"
-      }
-    }
-  }
-}
-```
-
----
+- 飞书配置 
+	
+	 [快速开始 🔗 ](https://github.com/YuanG1944/message-bridge-opencode-plugin/tree/main/config-guide/lark/GUIDE.zh.md)
 
 ## 🚧 当前必须使用开发模式
 
