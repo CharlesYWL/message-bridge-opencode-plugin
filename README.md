@@ -27,6 +27,14 @@ After validation and real-world usage, it has evolved into a **general-purpose m
   * Stable message receiving & forwarding
   * Fully compatible with OpenCode plugin system
 
+* **Microsoft Teams** ✨ NEW
+
+  * Uses Microsoft Graph API (delegated permissions)
+  * Polling-based message receiving
+  * Send/edit messages in Teams DM
+  * OAuth token auto-refresh
+  * Requires Microsoft 365 / Office 365 license
+
 ### 🚧 Under Active Development
 
 * **iMessage** (Next priority)
@@ -153,7 +161,88 @@ npm install message-bridge-opencode-plugin
 > It is strongly recommended to use **string values** for all config fields to avoid parsing issues.
 
 ### Feishu / Lark (Webhook mode)
-	 [Quicj Start 🔗 ](https://github.com/YuanG1944/message-bridge-opencode-plugin/tree/main/config-guide/lark/GUIDE.md)
+	 [Quick Start 🔗 ](https://github.com/YuanG1944/message-bridge-opencode-plugin/tree/main/config-guide/lark/GUIDE.md)
+
+### Microsoft Teams
+
+#### Prerequisites
+
+1. **Microsoft 365 / Office 365 license** - Personal Outlook accounts won't work
+2. **Azure AD App Registration** - See setup steps below
+
+#### Step 1: Register Azure AD App
+
+1. Go to [Azure Portal](https://portal.azure.com) → Azure Active Directory → App registrations
+2. Click **"New registration"**
+3. Fill in:
+   - **Name**: `OpenCode Teams Bridge`
+   - **Supported account types**: "Accounts in this organizational directory only" (single-tenant)
+   - **Redirect URI**: Platform = "Mobile and desktop applications", URI = `http://localhost:3847/callback`
+4. Click **Register**
+
+#### Step 2: Configure API Permissions
+
+1. In your app → **API permissions** → **Add a permission**
+2. Select **Microsoft Graph** → **Delegated permissions**
+3. Add these permissions:
+   - `Chat.ReadWrite`
+   - `ChatMessage.Send`
+   - `offline_access`
+4. Click **"Grant admin consent"** (if you're an admin)
+
+#### Step 3: Get OAuth Tokens
+
+Run the helper script:
+
+```bash
+cd message-bridge-opencode-plugin
+node scripts/teams-oauth.js <client_id> <tenant_id>
+```
+
+- `client_id`: From your app's Overview page → "Application (client) ID"
+- `tenant_id`: From your app's Overview page → "Directory (tenant) ID"
+
+The script will:
+1. Print an authorization URL - open it in your browser
+2. Sign in with your **work/school account** (not personal)
+3. After consent, the script outputs your tokens
+
+#### Step 4: Configure opencode.json
+
+```json
+{
+  "plugin": ["/path/to/message-bridge-opencode-plugin"],
+  "agent": {
+    "teams-bridge": {
+      "options": {
+        "client_id": "your-client-id",
+        "tenant_id": "your-tenant-id",
+        "access_token": "your-access-token",
+        "refresh_token": "your-refresh-token",
+        "poll_interval_ms": 3000
+      }
+    }
+  }
+}
+```
+
+#### Step 5: Run OpenCode
+
+```bash
+opencode
+```
+
+You should see `[Teams] ✅ Starting message polling...` in the logs.
+
+#### Troubleshooting
+
+| Error | Solution |
+|-------|----------|
+| "Failed to get license information" | Use a work/school account with Teams license, not personal Outlook |
+| "403 Forbidden" | Check API permissions are granted and admin consented |
+| Token expired | The plugin auto-refreshes tokens using refresh_token |
+
+For detailed documentation, see [docs/TEAMS.md](./docs/TEAMS.md).
 
 ---
 
@@ -214,6 +303,7 @@ pwd
 ## 🛣 Roadmap
 
 * [x] Feishu / Lark (Production ready)
+* [x] Microsoft Teams (Production ready)
 * [ ] iMessage (Next milestone)
 * [ ] Telegram
 * [ ] Slack
