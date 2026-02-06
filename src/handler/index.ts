@@ -27,6 +27,7 @@ const sessionCache = new Map<string, string>(); // adapterKey:chatId -> sessionI
 const sessionToAdapterKey = new Map<string, string>(); // sessionId -> adapterKey
 const chatAgent = new Map<string, string>(); // adapterKey:chatId -> agent
 const chatSessionList = new Map<string, Array<{ id: string; title: string }>>();
+const chatAgentList = new Map<string, Array<{ id: string; name: string }>>();
 const chatMaxFileSizeMb: Map<string, number> =
   globalState.__bridge_max_file_size || new Map<string, number>();
 const chatMaxFileRetry: Map<string, number> =
@@ -316,6 +317,7 @@ export function stopGlobalEventListener() {
   sessionToAdapterKey.clear();
   chatAgent.clear();
   chatSessionList.clear();
+  chatAgentList.clear();
   chatMaxFileSizeMb.clear();
   chatMaxFileRetry.clear();
 }
@@ -440,6 +442,7 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
           sessionToCtx,
           chatAgent,
           chatSessionList,
+          chatAgentList,
           chatMaxFileSizeMb,
           chatMaxFileRetry,
           ensureSession,
