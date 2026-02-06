@@ -3,6 +3,7 @@
 export const AGENT_LARK = 'lark-bridge';
 export const AGENT_IMESSAGE = 'imessage-bridge';
 export const AGENT_TELEGRAM = 'telegram-bridge';
+export const AGENT_TEAMS = 'teams-bridge';
 
 export const LOADING_EMOJI = 'Typing';
 

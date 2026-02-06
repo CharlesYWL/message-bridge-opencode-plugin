@@ -3,13 +3,14 @@ import type { Plugin } from '@opencode-ai/plugin';
 import type { Config } from '@opencode-ai/sdk';
 
 import { globalState } from './src/utils';
-import { AGENT_LARK, AGENT_IMESSAGE, AGENT_TELEGRAM } from './src/constants';
+import { AGENT_LARK, AGENT_IMESSAGE, AGENT_TELEGRAM, AGENT_TEAMS } from './src/constants';
 
 import { AdapterMux } from './src/handler/mux';
 import { startGlobalEventListener, createIncomingHandler } from './src/handler';
 
 import { FeishuAdapter } from './src/feishu/feishu.adapter';
-import type { FeishuConfig, BridgeAdapter } from './src/types';
+import { TeamsAdapter } from './src/teams/teams.adapter';
+import type { FeishuConfig, TeamsConfig, BridgeAdapter } from './src/types';
 
 // isEnabled
 function isEnabled(cfg: Config, key: string): boolean {
@@ -53,6 +54,37 @@ function parseFeishuConfig(cfg: Config): FeishuConfig {
   };
 }
 
+function parseTeamsConfig(cfg: Config): TeamsConfig {
+  const node = cfg?.agent?.[AGENT_TEAMS];
+  const options = (node?.options || {}) as Record<string, any>;
+
+  const client_id = options.client_id;
+  const client_secret = options.client_secret;
+  const tenant_id = options.tenant_id || 'common';
+  const access_token = options.access_token;
+  const refresh_token = options.refresh_token;
+  const poll_interval_ms = options.poll_interval_ms || 3000;
+  const target_user_id = options.target_user_id;
+
+  if (!client_id) {
+    throw new Error(`[Plugin] Missing options for ${AGENT_TEAMS}: client_id`);
+  }
+
+  if (!access_token && !refresh_token) {
+    throw new Error(`[Plugin] Missing options for ${AGENT_TEAMS}: access_token or refresh_token required`);
+  }
+
+  return {
+    client_id,
+    client_secret,
+    tenant_id,
+    access_token,
+    refresh_token,
+    poll_interval_ms,
+    target_user_id,
+  };
+}
+
 export const BridgePlugin: Plugin = async ctx => {
   const { client } = ctx;
   console.log('[Plugin] BridgePlugin entry initializing...');
@@ -82,6 +114,11 @@ export const BridgePlugin: Plugin = async ctx => {
       if (isEnabled(cfg, AGENT_TELEGRAM)) {
         console.log('[Plugin] telegram-bridge enabled (not implemented yet).');
         // TODO: mux.register(AGENT_TELEGRAM, new TelegramAdapter(...))
+      }
+
+      if (isEnabled(cfg, AGENT_TEAMS)) {
+        const teamsCfg = parseTeamsConfig(cfg);
+        adaptersToStart.push({ key: AGENT_TEAMS, adapter: new TeamsAdapter(teamsCfg) });
       }
 
       if (adaptersToStart.length === 0) {

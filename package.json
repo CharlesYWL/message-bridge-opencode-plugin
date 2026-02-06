@@ -1,7 +1,7 @@
 {
-  "name": "opencode-plugin-feishu-bridge",
-  "version": "1.0.0",
-  "description": "Feishu Bridge Plugin for OpenCode",
+  "name": "opencode-plugin-message-bridge",
+  "version": "1.1.0",
+  "description": "Message Bridge Plugin for OpenCode - Feishu, Teams, and more",
   "main": "index.ts",
   "types": "dist/index.d.ts",
   "files": [
@@ -9,24 +9,29 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/YuanG1944/lark-bot-bridge-opencode-plugin"
+    "url": "https://github.com/YuanG1944/message-bridge-opencode-plugin"
   },
   "bugs": {
-    "url": "https://github.com/YuanG1944/lark-bot-bridge-opencode-plugin/issues"
+    "url": "https://github.com/YuanG1944/message-bridge-opencode-plugin/issues"
   },
-  "homepage": "https://github.com/YuanG1944/lark-bot-bridge-opencode-plugin",
+  "homepage": "https://github.com/YuanG1944/message-bridge-opencode-plugin",
   "scripts": {
     "build": "tsc",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "teams-oauth": "node scripts/teams-oauth.js"
   },
   "keywords": [
     "opencode",
-    "feishu"
+    "feishu",
+    "teams",
+    "microsoft",
+    "bridge"
   ],
   "author": "",
   "license": "MIT",
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.26.0",
+    "axios": "^1.7.0",
     "dotenv": "^16.4.5"
   },
   "peerDependencies": {

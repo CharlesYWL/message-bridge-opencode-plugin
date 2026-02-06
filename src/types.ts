@@ -32,4 +32,23 @@ export interface FeishuConfig {
   mode: BridgeMode;
   callback_url?: string;
   encrypt_key?: string;
+  tenant_token?: string;
+  disable_token_cache?: boolean;
+}
+
+export interface TeamsConfig {
+  /** Azure AD App Client ID */
+  client_id: string;
+  /** Client Secret (optional for public clients) */
+  client_secret?: string;
+  /** Tenant ID (use 'common' for multi-tenant) */
+  tenant_id?: string;
+  /** OAuth Access Token (delegated) */
+  access_token?: string;
+  /** OAuth Refresh Token for auto-renewal */
+  refresh_token?: string;
+  /** Polling interval in ms (default: 3000) */
+  poll_interval_ms?: number;
+  /** Target user ID for DM (optional - if set, will auto-create chat) */
+  target_user_id?: string;
 }
